@@ -10,40 +10,6 @@
 """
 
 from chef import Node, Search
-from pyronfan import Cluster, Cloud, Facet
-
-
-def load_cluster(filename):
-  """Load cluster configuration from a YAML file."""
-
-  import yaml
-  f = open(filename)
-  data = yaml.load(f)
-
-  assert 'name' in data
-  assert 'cloud' in data
-
-  cluster = Cluster(data['name'])
-
-  # configure cluster enviroment
-  if 'environment' in data:
-    cluster.environment = data['environment']
-
-  # configure cloud information
-  cluster.cloud = Cloud(data['cloud']['name'])
-  if 'user' in data['cloud']:
-    cluster.cloud.user = data['cloud']['user']
-
-  cluster.run_list.extend([u'role[%s]' % role for role in data['roles']])
-
-  # configure servers
-  for f in data.get('facets', []):
-    facet = Facet(f['name'])
-    facet.instances = f['instances']
-    facet.roles(*f['roles'])
-    cluster.facets.append(facet)
-
-  return cluster
 
 
 def create_instances(cluster, facet):
@@ -75,8 +41,11 @@ def create_nodes(cluster, facet):
   for nodename, ipaddress in instances:
     node = Node(nodename)
     if node.exists:
-      print('%s exists!' % nodename)
-      ipaddress = node.get('ipaddress', ipaddress)
+      node_ipaddress = node.get('ipaddress')
+      if ipaddress is None and node_ipaddress:
+        ipaddress = node_ipaddress
+      elif node_ipaddress and node_ipaddress != ipaddress:
+        raise Exception('The remote IP address is different: %s' % node_ipaddress)
 
     if ipaddress is None:
       raise Exception('Can not determine the IP address for %s' % nodename)

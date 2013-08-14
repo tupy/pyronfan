@@ -12,44 +12,43 @@
 from __future__ import absolute_import
 
 import os
-from fabric.api import *
+
 from chef import *
 from chef.fabric import chef_environment, chef_roledefs
 
-from pyronfan import Cluster
-from pyronfan.utils import load_cluster, create_nodes, search_node
+from fabric.api import env, task, roles, hosts, local, sudo
+
+from pyronfan.cluster import Cluster
+from pyronfan.loader import YAMLLoader
+from pyronfan.utils import create_nodes, search_node
+
 
 env.cluster_name = None
 
-def configure(cluster_name):
-  """Load and configure the cluster on the Fabric environment."""
-
-  cluster = Cluster.TYPES.get(cluster_name)
-  if cluster:
-    return cluster
-
-  filename = '%s.yml' % cluster_name
-  print('Loading %s' % filename)
-  if not os.path.exists(filename):
-    raise IOError('Could not load the File not found')
-  cluster = load_cluster(filename)
-
-  for facet in cluster.facets:
-    create_nodes(cluster, facet)
-    # update list of hosts
-    hosts = facet.nodes.keys()
-    #env.hosts.extend(hosts)
-
-  env.cluster = cluster
-  env.cluster_name = cluster.name
-  env.user = env.cluster.cloud.user
 
 @task
 def cluster(cluster_name):
   """Load and configure the cluster on the Fabric environment."""
 
-  env.roledefs = chef_roledefs(hostname_attr = ['ipaddress'])
-  configure(cluster_name)
+  # moved to the first line to auto configure the chef api
+  env.roledefs = chef_roledefs(hostname_attr=['ipaddress'])
+
+  cluster = Cluster.TYPES.get(cluster_name)
+  if cluster is None:
+
+    loader = YAMLLoader(cluster_name)
+    cluster = loader.load()
+
+    for facet in cluster.facets:
+      create_nodes(cluster, facet)
+      # update list of hosts
+      hosts = facet.nodes.keys()
+      #env.hosts.extend(hosts)
+
+  # update env
+  env.cluster = cluster
+  env.cluster_name = cluster.name
+  env.user = env.cluster.cloud.user
 
   # update the roledefs and set the cluster role
   env.roledefs[env.cluster_name] = env.cluster.hosts
@@ -58,22 +57,39 @@ def cluster(cluster_name):
   if not getattr(env, 'chef_environment', None):
     env.chef_environment = env.cluster.environment
 
+
 @task
-def kick():
+def bootstrap(pattern=None):
+  """Execute knife bootstrap to start a new node."""
+
+  node = env.cluster.get(env.host)
+  if pattern and not node.name.startswith(pattern):
+    return
+  # if node is None:
+  #   node = search_node(env.host)
+  ctx = {
+    'user': env.user,
+    'host': env.host,
+    'nodename': node.name,
+    'environment': env.chef_environment,
+    'run_list': ','.join(node.run_list)
+  }
+
+  local('knife bootstrap %(host)s -x %(user)s -r "%(run_list)s" --sudo -N %(nodename)s -E %(environment)s' % ctx)
+
+@task
+def kick(pattern=None):
   """Execute chef-client in the host."""
 
+  node = env.cluster.get(env.host)
+  if pattern and not node.name.startswith(pattern):
+    return
   sudo('chef-client')
 
 @task
 @hosts('localhost')
-def kill(cluster_name=None):
+def kill():
   """Remove the cluster nodes from Chef server."""
-
-  cluster_name = cluster_name or env.cluster_name
-  if not cluster_name:
-    raise IOError('cluster_name not defined')
-
-  configure(cluster_name)
 
   for facet in env.cluster.facets:
     for node in facet.nodes.values():
@@ -81,16 +97,11 @@ def kill(cluster_name=None):
         node.delete()
         print("%s deleted" % node.name)
 
+
 @task
 @hosts('localhost')
-def sync(cluster_name=None):
+def sync():
   """Syncronize cluster nodes with Chef server."""
-
-  cluster_name = cluster_name or env.cluster_name
-  if not cluster_name:
-    raise IOError('cluster_name not defined')
-
-  configure(cluster_name)
 
   # create cluster roles
   cluster_role = "%s_cluster" % env.cluster.name
@@ -102,7 +113,6 @@ def sync(cluster_name=None):
     facet_role = Role(facet_role)
     facet_role.save()
     print('role[%s] saved\n' % facet_role)
-    # save nodes
     for node in facet.nodes.values():
       print('Node Name: %s' % node.name)
       print('IP:        %s' % node['ipaddress'])
@@ -110,20 +120,20 @@ def sync(cluster_name=None):
       print('')
       node.save()
 
+
 @task
-def bootstrap():
-  """Execute knife bootstrap to start a new node."""
+@hosts('localhost')
+def test():
 
-  print("Running bootstrap on %s" % env.host)
-  node = env.cluster.get(env.host)
-  if node is None:
-    node = search_node(env.host)
-  ctx = {
-    'user': env.user,
-    'host': env.host,
-    'nodename': node.name,
-    'environment': env.chef_environment,
-    'run_list': ','.join(node.run_list)
-  }
+  print('Cluster Name: %s' % env.cluster.name)
+  print('Cloud Name: %s' % env.cluster.cloud.name)
+  print('Environment: %s' % env.cluster.environment)
 
-  local('knife bootstrap %(host)s -x %(user)s -r "%(run_list)s" --sudo -N %(nodename)s -E %(environment)s' % ctx)
+  for facet in env.cluster.facets:
+    print('---------------------------------------------')
+    print('Facet Name: %s\n' % facet.name)
+    for node in facet.nodes.values():
+      print('Node Name: %s' % node.name)
+      print('IP:        %s' % node['ipaddress'])
+      print('Run List:  %s' % ', '.join(node.run_list))
+      print('')
